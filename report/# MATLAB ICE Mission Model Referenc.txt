@@ -1,0 +1,796 @@
+# MATLAB ICE Mission Model Reference Map
+
+This file documents the engineering logic behind the MATLAB ICE mission code and maps each major modeling choice to references that can be cited in the report. It is written to support the script:
+
+- `tb2_ice_masoodwei_calibrated_mission.m`
+
+The project logic is:
+
+1. Reconstruct a published fixed-wing UAV mission from Masood and Wei.
+2. Calibrate the simplified ICE fuel model using the paper's published fuel burn.
+3. Transfer the calibrated fuel-consumption scaling to a TB2-class UAV mission.
+4. Compare variable-atmosphere and fixed-atmosphere assumptions.
+5. Build stage-level plots/tables for mission, energy, speed, thrust, aerodynamic coefficients, fuel flow, and CO2.
+
+## 1. Literature Benchmark And Calibration
+
+### Code locations
+
+- `buildMasoodWeiBenchmark`
+- `buildPaperComparisonTables`
+- `paper.calibration.bsfcScale`
+- `paperSimUncal`, `paperSimVariable`, `paperSimFixed`
+
+### What the code does
+
+The code reconstructs the fixed-wing UAV benchmark aircraft and mission from Masood and Wei (2012). The paper provides the aircraft mass, fuel mass, wing geometry, engine data, mission segment durations, segment ranges, stage fuel consumption, total mission time, total range, and total fuel used.
+
+The code first simulates the mission using an initial assumed BSFC. Then it computes:
+
+```matlab
+paper.calibration.bsfcScale = paper.published.totalFuelConsumed_kg / paperSimUncal.fuelUsed(end);
+paper.aircraft.BSFC = paper.aircraft.BSFC * paper.calibration.bsfcScale;
+```
+
+This is a one-parameter calibration of the fuel model. The aim is not to claim that all engine physics are perfectly modeled, but to align the simplified model with a published UAV mission before transferring it to the TB2-class mission.
+
+### Why this is valid
+
+Calibration against published flight-performance data is a standard modeling practice when a reduced-order model is used. Because the MATLAB model is intentionally simplified, the fuel model is calibrated using a known benchmark instead of pretending the initial assumed BSFC is exact.
+
+### Main reference
+
+- Khayyam Masood and Zhang Wei, "Detailed Flight Performance Analysis of a Fixed Wing UAV," AIAA 2012-2595, 2012. DOI: `10.2514/6.2012-2595`.
+
+### How to cite in the report
+
+"The ICE simulation was calibrated using the fixed-wing UAV mission benchmark published by Masood and Wei. Their paper provides aircraft parameters, mission segment data, and fuel consumption values, allowing the simplified MATLAB fuel model to be scaled before being transferred to the TB2-class mission."
+
+## 2. TB2-Class Aircraft Inputs
+
+### Code locations
+
+- `buildTB2Model`
+- `tb2.MTOW`
+- `tb2.wingspan`
+- `tb2.length`
+- `tb2.enginePowerHP`
+- `tb2.maxSpeedKTAS`
+- `tb2.cruiseSpeedKTAS`
+- `tb2.operationalAltitude_ft`
+- `tb2.endurance_hr_public`
+
+### What the code does
+
+The code defines a TB2-class aircraft using public specifications:
+
+- MTOW: 700 kg
+- Wingspan: 12 m
+- Length: 6.5 m
+- Power plant: 100 hp internal combustion engine
+- Operational altitude: 16,000 ft
+- Endurance: 20+ hr
+- Maximum speed: 110 KTAS
+
+The code also includes modeling assumptions not directly published by Baykar, such as wing reference area, `CLmax`, `CD0`, Oswald efficiency, propeller efficiency, and base BSFC.
+
+### Why this is valid
+
+Public manufacturer specifications can define the outer envelope of the vehicle model. Aerodynamic coefficients that are not public are treated as engineering assumptions and then evaluated through calibration and sensitivity analysis.
+
+### Main reference
+
+- Baykar, "Bayraktar TB2," official product page. Public values include 12 m wingspan, 20+ hours endurance, 110 KTAS maximum speed, 16,000 ft operational altitude, 700 kg MTOW, 100 hp ICE power plant, and 6.5 m length.
+
+### How to cite in the report
+
+"The TB2-class geometric and performance envelope was based on the manufacturer's public specifications. Parameters not publicly available, such as drag polar constants and propeller efficiency, were treated as modeling assumptions and checked through calibration/sensitivity logic."
+
+## 3. Atmosphere Model
+
+### Code locations
+
+- `isaTroposphere`
+- `makeAtmosphereModel`
+- `evaluateAtmosphere`
+- `paper.variableAtmosphere`
+- `paper.fixedAtmosphere`
+- `tb2.variableAtmosphere`
+- `tb2.fixedAtmosphere`
+
+### What the code does
+
+The code models air temperature, pressure, density, and speed of sound as functions of altitude:
+
+```matlab
+T = T0 - L*h
+P = P0 * (T/T0)^(g/(R*L))
+rho = P/(R*T)
+a = sqrt(gamma*R*T)
+```
+
+For altitudes above 11 km, the code switches to an isothermal stratosphere approximation.
+
+The code then compares two cases:
+
+- Variable atmosphere: `T`, `P`, `rho`, and speed of sound vary with altitude.
+- Fixed atmosphere: `T`, `P`, `rho`, and speed of sound are held constant at a representative reference altitude.
+
+### Why this is valid
+
+The implemented equations match the International Standard Atmosphere / U.S. Standard Atmosphere approach for a standard troposphere. The fixed-versus-variable comparison is a controlled sensitivity test: the aircraft, mission, aerodynamics, and fuel model remain the same, so output differences are caused only by the atmosphere assumption.
+
+### Main references
+
+- U.S. Standard Atmosphere, 1976, U.S. Government Printing Office.
+- MathWorks Aerospace Toolbox documentation, `atmosisa`, which returns ISA temperature, pressure, density, and speed of sound as functions of geopotential altitude.
+- NASA Glenn educational atmosphere/aerodynamics material for standard atmosphere and aerodynamic dependence on density.
+
+### How to cite in the report
+
+"The altitude-dependent atmosphere model follows the ISA/U.S. Standard Atmosphere formulation, in which temperature, pressure, density, and speed of sound are computed as functions of altitude. A fixed-atmosphere model was then compared against the variable-atmosphere model to quantify whether the simplification significantly affects fuel burn, range, and other mission outputs."
+
+## 4. Dynamic Pressure, Lift, And Drag
+
+### Code locations
+
+- `simulateSegmentedMission`
+- `computeSteadyLevelMetrics`
+- `q = 0.5 * rho * V^2`
+- `Lift = m*g*cos(gammaPath)`
+- `CL = Lift/(q*S)`
+- `Drag = q*S*CD`
+
+### What the code does
+
+The model computes dynamic pressure:
+
+```matlab
+q = 0.5 * rho * V^2;
+```
+
+Lift coefficient:
+
+```matlab
+CL = Lift / (q * wingArea);
+```
+
+Drag:
+
+```matlab
+Drag = q * wingArea * CD;
+```
+
+For climbing or descending flight, lift is approximated using the component of weight normal to the flight path:
+
+```matlab
+Lift = m*g*cos(gammaPath);
+```
+
+### Why this is valid
+
+These are standard aircraft performance equations. Dynamic pressure, lift coefficient, and drag coefficient formulations are foundational in aircraft performance and are suitable for a reduced-order UAV mission model.
+
+### Main references
+
+- NASA Glenn, "The Lift Equation."
+- NASA Glenn, "The Drag Equation."
+- John D. Anderson, Introduction to Flight.
+- Barnes W. McCormick, Aerodynamics, Aeronautics, and Flight Mechanics.
+
+### How to cite in the report
+
+"The aerodynamic force model uses the classical dynamic-pressure formulation. Lift and drag are expressed using nondimensional coefficients, which is standard in aircraft performance modeling."
+
+## 5. Drag Polar And Induced Drag
+
+### Code locations
+
+- `buildMasoodWeiBenchmark`
+- `buildTB2Model`
+- `computeSteadyLevelMetrics`
+- `p.aspectRatio = p.wingspan^2 / p.wingArea`
+- `p.kInduced = 1 / (pi * p.oswald * p.aspectRatio)`
+- `CD = CD0 + kInduced * CL^2`
+
+### What the code does
+
+The code uses a parabolic drag polar:
+
+```matlab
+CD = CD0 + k*CL^2
+```
+
+where:
+
+```matlab
+k = 1/(pi*e*AR)
+AR = b^2/S
+```
+
+### Why this is valid
+
+The parabolic drag polar is widely used in preliminary aircraft design and performance analysis. It separates drag into:
+
+- Zero-lift/parasitic drag, represented by `CD0`
+- Lift-induced drag, represented by `k*CL^2`
+
+This is appropriate for a conceptual UAV mission model where detailed CFD or wind-tunnel drag polars are unavailable.
+
+### Main references
+
+- John D. Anderson, Introduction to Flight.
+- Daniel P. Raymer, Aircraft Design: A Conceptual Approach.
+- Barnes W. McCormick, Aerodynamics, Aeronautics, and Flight Mechanics.
+- NASA Glenn drag equation material, for the force-level drag relationship.
+
+### How to cite in the report
+
+"A parabolic drag polar was adopted because detailed TB2 aerodynamic polar data are not publicly available. This formulation is standard in preliminary aircraft performance studies and allows induced drag to be approximated from aspect ratio and Oswald efficiency factor."
+
+## 6. Stall, Takeoff, And Approach Speeds
+
+### Code locations
+
+- `VstallSL_tb2`
+- `VTO_tb2 = 1.20 * VstallSL_tb2`
+- `Vapp_tb2 = 1.30 * VstallSL_tb2`
+- `VstallTime`
+
+### What the code does
+
+The code computes stall speed using:
+
+```matlab
+Vstall = sqrt(2*W/(rho*S*CLmax))
+```
+
+Then it defines:
+
+```matlab
+VTO = 1.20*Vstall
+Vapp = 1.30*Vstall
+```
+
+The code also calculates instantaneous stall speed during the mission as mass and air density change.
+
+### Why this is valid
+
+The stall-speed equation follows directly from setting lift equal to weight at `CLmax`. The multipliers for takeoff and approach are conservative preliminary-design/flight-performance assumptions commonly used to keep flight speed above stall. They should be reported as assumptions, not as certified TB2 operating speeds.
+
+### Main references
+
+- NASA Glenn, "The Lift Equation."
+- FAA Pilot's Handbook of Aeronautical Knowledge, aircraft performance and V-speed discussions.
+- Raymer, Aircraft Design: A Conceptual Approach, preliminary aircraft sizing/performance methods.
+
+### How to cite in the report
+
+"Stall speed was calculated from the lift equation at maximum lift coefficient. Takeoff and approach speeds were assumed as margins above stall speed for preliminary mission analysis; these are not claimed as certified TB2 speeds."
+
+## 7. Mission Segmentation And Stage Profiles
+
+### Code locations
+
+- `buildMissionProfile`
+- `buildSpecificMissionDefinition`
+- `phaseIdx`
+- `phaseEdges`
+- `stageSummary`
+
+### What the code does
+
+The mission is divided into ordered segments. For the paper benchmark, the script reconstructs the nine mission stages from the paper. For the TB2-class case, the script builds:
+
+1. Takeoff
+2. Climb
+3. Transit out
+4. Loiter ISR
+5. Transit home
+6. Descent
+7. Landing
+
+Within each segment, altitude and speed are interpolated linearly:
+
+```matlab
+VSeg = linspace(V0, V1, nPts)
+hSeg = linspace(h0, h1, nPts)
+```
+
+### Why this is valid
+
+Segmented mission modeling is standard for preliminary aircraft mission analysis. It allows energy, fuel, range, and aerodynamic states to be computed stage-by-stage. Linear interpolation is a simplification, but it is reasonable for a first-order mission model when detailed autopilot commands, wind, and flight-test data are unavailable.
+
+### Main references
+
+- Masood and Wei (2012), which provides a segmented fixed-wing UAV mission.
+- Raymer, Aircraft Design: A Conceptual Approach, mission-profile and sizing logic.
+- FAA Pilot's Handbook of Aeronautical Knowledge, aircraft performance over takeoff, climb, cruise, descent, and landing phases.
+
+### How to cite in the report
+
+"The mission was modeled using a segmented profile, which is standard in preliminary aircraft performance analysis. Each segment has a defined duration, speed schedule, altitude schedule, and flight mode."
+
+## 8. Climb, Descent, Acceleration, And Thrust Requirement
+
+### Code locations
+
+- `simulateSegmentedMission`
+- `hdot = gradient(h, dt)`
+- `gammaPath = asin(hdot/V)`
+- `aLong = gradient(V, dt)`
+- `ThrustReq = Drag + m*aLong + m*g*sin(gammaPath)`
+
+### What the code does
+
+The code estimates vertical speed, flight-path angle, and longitudinal acceleration:
+
+```matlab
+hdot = gradient(h, dt)
+gamma = asin(hdot/V)
+a = gradient(V, dt)
+```
+
+Then it estimates required thrust:
+
+```matlab
+Treq = D + m*a + m*g*sin(gamma)
+```
+
+### Why this is valid
+
+This is a point-mass aircraft-performance approximation along the flight path. It captures the main force balance:
+
+- Drag must be overcome.
+- Acceleration requires additional force.
+- Climb requires force against the component of weight along the flight path.
+- Descent can reduce required thrust.
+
+This is appropriate for mission energy estimation, though it does not replace a full 6-DOF flight dynamics model.
+
+### Main references
+
+- Etkin and Reid, Dynamics of Flight: Stability and Control.
+- Stevens, Lewis, and Johnson, Aircraft Control and Simulation.
+- McCormick, Aerodynamics, Aeronautics, and Flight Mechanics.
+
+### How to cite in the report
+
+"The mission model uses a point-mass force balance along the flight path. This level of fidelity is appropriate for estimating mission energy and fuel consumption, while a full 6-DOF model would be required for detailed flight-control analysis."
+
+## 9. Loiter Motion And 3D Path Visualization
+
+### Code locations
+
+- `modeIdx`
+- `loiterRadius`
+- `heading`
+- `x`, `y`, `pathS`
+- `plot3`
+
+### What the code does
+
+Straight flight keeps heading fixed. Loiter flight updates heading according to:
+
+```matlab
+omega = Vh / loiterRadius
+heading(k+1) = heading(k) + omega*dt
+```
+
+Position is then updated with:
+
+```matlab
+x(k+1) = x(k) + Vh*cos(heading)*dt
+y(k+1) = y(k) + Vh*sin(heading)*dt
+```
+
+### Why this is valid
+
+This is a kinematic path model. It does not simulate roll dynamics, bank angle, or autopilot control laws, but it gives a clear 3D mission visualization and a physically interpretable loiter radius/path length.
+
+### Main references
+
+- Beard and McLain, Small Unmanned Aircraft: Theory and Practice.
+- Stevens, Lewis, and Johnson, Aircraft Control and Simulation.
+- MathWorks MATLAB documentation for `plot3`.
+
+### How to cite in the report
+
+"The 3D route is a kinematic visualization of the mission path. It is intended to display mission geometry and stage sequence, not to certify maneuver-control dynamics."
+
+## 10. Power Required, Propeller Efficiency, And Available Thrust
+
+### Code locations
+
+- `computeSteadyLevelMetrics`
+- `PowerReq = ThrustReq * V / etaProp`
+- `PowerUsed`
+- `thrustAvailable = etaProp*enginePowerMax/V`
+
+### What the code does
+
+The code converts thrust power into shaft power using a propeller efficiency:
+
+```matlab
+PowerReq = Treq*V/etaProp
+```
+
+It also applies idle and maximum power limits:
+
+```matlab
+PowerUsed = min(max(PowerReq, idlePowerFrac*enginePowerMax), enginePowerMax)
+```
+
+Available thrust is estimated from power:
+
+```matlab
+Tavailable = etaProp*Pmax/V
+```
+
+### Why this is valid
+
+For propeller aircraft, useful propulsive power is approximately thrust times airspeed. Propeller efficiency links shaft power to useful propulsive power. This is a reasonable preliminary model when a detailed propeller map is unavailable.
+
+### Main references
+
+- McCormick, Aerodynamics, Aeronautics, and Flight Mechanics.
+- Raymer, Aircraft Design: A Conceptual Approach.
+- Anderson, Introduction to Flight.
+- Masood and Wei (2012), for benchmark engine/propeller losses and mission-performance comparison.
+
+### How to cite in the report
+
+"Power required was estimated from thrust power divided by propeller efficiency. Since detailed propeller maps are unavailable, constant propeller efficiency was treated as a preliminary design assumption and the fuel model was calibrated against literature."
+
+## 11. BSFC, Fuel Flow, Fuel Energy, And Mass Depletion
+
+### Code locations
+
+- `p.BSFC`
+- `fuelFlow = p.BSFC * (PowerUsed / 1000) / 3600`
+- `fuelUsed`
+- `fuelMass`
+- `mass`
+- `fuelEnergyRate = fuelFlow * LHV`
+
+### What the code does
+
+The code computes fuel flow from brake specific fuel consumption:
+
+```matlab
+fuelFlow = BSFC * power_kW / 3600
+```
+
+Then it updates fuel used, remaining fuel, and aircraft mass through time:
+
+```matlab
+fuelUsed(k+1) = fuelUsed(k) + fuelFlow(k)*dt
+fuelMass(k+1) = fuelMass0 - fuelUsed(k+1)
+mass(k+1) = dryMass + fuelMass(k+1)
+```
+
+Fuel energy is estimated using:
+
+```matlab
+fuelEnergyRate = fuelFlow * LHV
+```
+
+### Why this is valid
+
+BSFC is a standard way to estimate fuel consumption from shaft power for piston/propeller aircraft engines. Updating mass as fuel burns is important because it changes stall speed, lift coefficient, drag, and power requirement.
+
+### Main references
+
+- Masood and Wei (2012), for published fuel consumption calibration.
+- Rotax 914/100 hp engine data in the benchmark paper.
+- Anderson, Raymer, and McCormick for fuel/power aircraft performance logic.
+- Fuel LHV references such as NIST Chemistry WebBook or standard fuel-property references.
+
+### How to cite in the report
+
+"Fuel flow was modeled using BSFC multiplied by shaft power. The BSFC value was then calibrated to match the literature benchmark fuel burn, and fuel mass was depleted over time so that aircraft weight changed during the mission."
+
+## 12. CO2 Emissions Estimate
+
+### Code locations
+
+- `p.CO2factor = 3.16`
+- `CO2cum = fuelUsed * p.CO2factor`
+
+### What the code does
+
+The model estimates cumulative CO2 emissions as:
+
+```matlab
+CO2 = fuelUsed * CO2factor
+```
+
+where `CO2factor` is in kg CO2 per kg fuel.
+
+### Why this is valid
+
+This is a direct tailpipe-emissions estimate based on fuel burned. It is appropriate for comparing ICE, hybrid, and electric configurations at the mission level. It does not include upstream emissions from fuel production, transport, electricity generation, or battery manufacturing.
+
+### Main references
+
+- U.S. EPA greenhouse gas emissions from gasoline combustion.
+- IPCC or national greenhouse-gas inventory factors can be used for final reporting if a more formal emissions inventory method is required.
+
+### How to cite in the report
+
+"CO2 was estimated from fuel burned using a constant emissions factor. This gives a mission-level tailpipe CO2 estimate, which is sufficient for comparing propulsion concepts under the same mission profile."
+
+## 13. Best-Range And Best-Endurance Speed Logic
+
+### Code locations
+
+- `computeBestRangeCruiseSpeed`
+- `computeBestEnduranceCruiseSpeed`
+- `optimizeMissionSpeeds`
+- `transitFuelPerKm`
+- `loiterFuelPerHour`
+
+### What the code does
+
+The code evaluates candidate speeds and selects:
+
+- Transit speed that minimizes fuel per kilometer.
+- Loiter speed that minimizes fuel per hour.
+
+For steady level flight:
+
+```matlab
+transitFuelPerKm = 1000*fuelFlow/V
+loiterFuelPerHour = 3600*fuelFlow
+```
+
+### Why this is valid
+
+For a propeller aircraft, range is improved by minimizing fuel per distance, while endurance is improved by minimizing fuel per time. The code performs this numerically rather than relying on a closed-form analytic solution, which makes it compatible with the chosen power limits, stall limits, and calibrated BSFC model.
+
+### Main references
+
+- Anderson, Introduction to Flight, aircraft range/endurance performance.
+- Raymer, Aircraft Design: A Conceptual Approach, mission sizing and cruise performance.
+- McCormick, Aerodynamics, Aeronautics, and Flight Mechanics.
+- FAA Pilot's Handbook of Aeronautical Knowledge, aircraft performance effects.
+
+### How to cite in the report
+
+"Transit and loiter speeds were selected by direct numerical search. The transit speed minimizes fuel per unit distance, while the loiter speed minimizes fuel per unit time, matching standard range and endurance logic for propeller aircraft."
+
+## 14. Variable-Versus-Fixed Atmosphere Sensitivity
+
+### Code locations
+
+- `buildAtmosphereSensitivityTable`
+- `summarizeAtmosphereImpact`
+- `paperSensitivityTable`
+- `tb2SensitivityTable`
+
+### What the code does
+
+The code compares key outputs:
+
+- Mission time
+- Path length
+- Fuel used
+- Downrange
+- Fuel remaining
+- Fuel energy
+- CO2
+- Average fuel rate
+- Mean temperature
+- Mean density
+- Mean Mach
+- Mean `CL`
+- Mean `CD`
+- Maximum thrust
+
+Percentage difference is computed as:
+
+```matlab
+100*(fixed - variable)/variable
+```
+
+The decision rule is:
+
+- Less than 2%: fixed atmosphere is essentially identical.
+- 2% to 5%: fixed atmosphere is acceptable for early-stage analysis.
+- Greater than 5%: variable atmosphere should be retained.
+
+### Why this is valid
+
+This is a one-factor sensitivity study. It isolates one modeling assumption while holding the rest of the model unchanged. The 2% and 5% thresholds are engineering screening thresholds chosen for project decision-making; they are not universal certification criteria.
+
+### Main references
+
+- NIST/SEMATECH e-Handbook of Statistical Methods, design-of-experiments and factor screening logic.
+- Saltelli et al., Global Sensitivity Analysis: The Primer.
+- U.S. Standard Atmosphere / MathWorks `atmosisa`, for the variable atmosphere model being tested.
+
+### How to cite in the report
+
+"A one-factor sensitivity analysis was used to test the influence of atmospheric modeling. Since only the atmosphere treatment was changed, the resulting percentage differences quantify whether the fixed-atmosphere simplification affects the mission conclusions."
+
+## 15. Stage Tables And Mission Summary Tables
+
+### Code locations
+
+- `stageSummary`
+- `buildStageMetricMatrix`
+- `buildMissionOverviewTable`
+- `buildOverallComparisonTable`
+
+### What the code does
+
+The script stores stage-level results in tables:
+
+- Duration
+- Path length
+- Downrange
+- Fuel used
+- Fuel energy
+- Mean power
+- Mean thrust
+- Mean acceleration
+- Mean `CL`
+- Mean `CD`
+- Mean fuel flow
+
+It also builds comparison tables for:
+
+- Published paper values versus simulated values.
+- Variable atmosphere versus fixed atmosphere.
+- Overall TB2 mission inputs and outputs.
+
+### Why this is valid
+
+Stage tables make the analysis auditable. Instead of only reporting total fuel burn, the model shows which mission phase consumes fuel and why. This is especially important before comparing ICE, hybrid, and electric systems.
+
+### Main references
+
+- MathWorks MATLAB `table` documentation.
+- MathWorks MATLAB categorical/bar documentation for ordered stage visualization.
+- Masood and Wei (2012), because their stage table motivated the calibration table structure.
+
+### How to cite in the report
+
+"The simulation results were summarized in MATLAB tables to make the comparison traceable at both mission and stage levels. This mirrors the segmented reporting structure used in the benchmark paper."
+
+## 16. Normalized Stage-Time Visualization
+
+### Code locations
+
+- `buildNormalizedStageProfiles`
+- `annotateEqualStages`
+- `tb2Normalized.equalStageTime`
+
+### What the code does
+
+The code maps each mission stage to an equal-width plotting interval:
+
+```matlab
+localStageTime = (t - tStart)/(tEnd - tStart)
+equalStageTime = (stageNumber - 1) + localStageTime
+```
+
+This lets short phases such as takeoff and landing appear with the same visual width as longer phases such as loiter.
+
+### Why this is valid
+
+This is a visualization normalization, not a physics transformation. It does not change the simulation results. It only makes each phase easier to inspect visually.
+
+### Main references
+
+- MathWorks MATLAB plotting documentation.
+- General data visualization practice: normalization is commonly used to compare patterns across unequal-duration segments, as long as the axis is clearly labeled.
+
+### How to cite in the report
+
+"Stage-normalized plots were used only for visualization. They do not alter the mission physics; they rescale each stage to equal visual width so that short phases remain readable."
+
+## 17. Ordered Categorical Stages In Figures
+
+### Code locations
+
+- `paperPhaseCats = categorical(paper.phaseNames, paper.phaseNames, 'Ordinal', true)`
+- `tb2PhaseCats = categorical(tb2SimVariable.phaseNames, tb2SimVariable.phaseNames, 'Ordinal', true)`
+
+### What the code does
+
+The code forces MATLAB bar charts to show mission stages in mission order rather than alphabetical order.
+
+### Why this is valid
+
+Mission phases are ordinal categories. Their sequence matters physically, so alphabetical sorting would be misleading.
+
+### Main reference
+
+- MathWorks MATLAB `categorical` documentation.
+
+### How to cite in the report
+
+"Mission stages were treated as ordinal categorical variables so that stage plots follow physical mission order rather than alphabetical order."
+
+## 18. Figures And 3D Mission Plot
+
+### Code locations
+
+- `figure`
+- `tiledlayout`
+- `subplot`
+- `plot`
+- `plot3`
+- `bar`
+- `annotatePhases`
+- `annotatePhasesHours`
+
+### What the code does
+
+The script generates:
+
+- Published versus simulated calibration plots.
+- Velocity and stall-speed plots.
+- Altitude profile.
+- 3D mission trajectory.
+- Mass and power-fraction plots.
+- Atmosphere sensitivity plots.
+- Energy and fuel-use plots.
+- Stage-normalized plots.
+- Speed optimization plots.
+
+### Why this is valid
+
+The plots are diagnostic outputs. They make it possible to check that the model behaves physically: altitude follows the mission profile, fuel decreases monotonically, mass decreases with fuel burn, stall speed changes with mass/density, and fuel consumption is concentrated in expected phases.
+
+### Main references
+
+- MathWorks MATLAB plotting documentation: `plot`, `plot3`, `bar`, `tiledlayout`, `subplot`.
+- Masood and Wei (2012), for comparison-figure motivation.
+
+### How to cite in the report
+
+"MATLAB figures were used as diagnostic and presentation tools to verify physical trends and compare mission stages visually."
+
+## 19. Important Limitations To State Clearly
+
+These are not weaknesses if they are stated clearly. They actually make the project more defensible.
+
+- The model is a reduced-order mission energy model, not a certified flight dynamics model.
+- Wind, gusts, autopilot dynamics, control-surface deflections, and propulsion maps are not fully modeled.
+- TB2 aerodynamic coefficients are assumed because detailed TB2 polar data are not public.
+- The fuel model is calibrated to a comparable fixed-wing UAV mission, not to TB2 flight-test fuel logs.
+- CO2 is tailpipe-only and does not include lifecycle emissions.
+- The normalized stage axis is for visualization only.
+- Fixed-atmosphere use is justified only if the sensitivity table shows small differences for the mission studied.
+
+## 20. Report-Ready Paragraph
+
+The MATLAB ICE model was built as a reduced-order fixed-wing UAV mission analysis tool. Aircraft motion was represented using a segmented mission profile, while aerodynamic forces were calculated from standard lift, drag, dynamic-pressure, and parabolic-drag-polar relationships. Fuel consumption was modeled using brake specific fuel consumption multiplied by shaft power, and the fuel model was calibrated against the published fixed-wing UAV benchmark of Masood and Wei. The calibrated model was then transferred to a TB2-class mission using public Baykar TB2 specifications. To justify atmospheric simplification, the same mission was simulated with both altitude-varying ISA properties and fixed representative atmospheric properties. The resulting percentage differences in key outputs were used to decide whether the fixed-atmosphere assumption was acceptable for later ICE, hybrid, and electric propulsion comparisons.
+
+## 21. Source List
+
+Use these references in the bibliography.
+
+1. Masood, K., and Wei, Z., "Detailed Flight Performance Analysis of a Fixed Wing UAV," AIAA 2012-2595, 2012. DOI: `10.2514/6.2012-2595`.
+2. Baykar, "Bayraktar TB2," official product page, https://baykartech.com/en/uav/bayraktar-tb2/
+3. U.S. Standard Atmosphere, 1976, U.S. Government Printing Office, Washington, D.C.
+4. MathWorks, `atmosisa` documentation, https://www.mathworks.com/help/aerotbx/ug/atmosisa.html
+5. NASA Glenn Research Center, "The Lift Equation," https://www.grc.nasa.gov/www/k-12/VirtualAero/BottleRocket/airplane/lifteq.html
+6. NASA Glenn Research Center, "The Drag Equation," https://www.grc.nasa.gov/www/k-12/VirtualAero/BottleRocket/airplane/drageq.html
+7. Anderson, J. D., Introduction to Flight, McGraw-Hill.
+8. Raymer, D. P., Aircraft Design: A Conceptual Approach, AIAA.
+9. McCormick, B. W., Aerodynamics, Aeronautics, and Flight Mechanics, Wiley.
+10. Etkin, B., and Reid, L. D., Dynamics of Flight: Stability and Control, Wiley.
+11. Stevens, B. L., Lewis, F. L., and Johnson, E. N., Aircraft Control and Simulation, Wiley.
+12. Beard, R. W., and McLain, T. W., Small Unmanned Aircraft: Theory and Practice, Princeton University Press.
+13. FAA, Pilot's Handbook of Aeronautical Knowledge, aircraft performance chapters, https://www.faa.gov/regulations_policies/handbooks_manuals/aviation/phak
+14. NIST/SEMATECH, e-Handbook of Statistical Methods, Design of Experiments, https://www.itl.nist.gov/div898/handbook/
+15. Saltelli, A., Ratto, M., Andres, T., et al., Global Sensitivity Analysis: The Primer, Wiley.
+16. U.S. EPA, "Greenhouse Gas Emissions from a Typical Passenger Vehicle," https://www.epa.gov/greenvehicles/greenhouse-gas-emissions-typical-passenger-vehicle
+17. MathWorks, `categorical` documentation, https://www.mathworks.com/help/matlab/ref/categorical.html
+18. MathWorks, `table` documentation, https://www.mathworks.com/help/matlab/ref/table.html
+19. MathWorks, `bar` documentation, https://www.mathworks.com/help/matlab/ref/bar.html
+20. MathWorks, `plot3` documentation, https://www.mathworks.com/help/matlab/ref/plot3.html
+

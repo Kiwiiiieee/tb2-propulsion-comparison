@@ -1,0 +1,57 @@
+MASOOD-WEI PAPER CALIBRATION SUMMARY
+------------------------------------
+Published total fuel used            : 101.00 kg
+Uncalibrated simulated fuel used     : 80.85 kg
+Calibrated simulated fuel used       : 100.16 kg
+Applied BSFC scale factor            : 1.2493
+Published total range                : 1184.00 km
+Calibrated simulated total range     : 1183.10 km
+
+              Metric               Published    SimulatedUncalibrated    SimulatedCalibrated    PercentError_Calibrated
+    ___________________________    _________    _____________________    ___________________    _______________________
+
+    "Total Time (hr)"                 6.82               6.82                    6.82                          0       
+    "Total Range (km)"                1184             1183.1                  1183.1                  -0.075821       
+    "Fuel Used (kg)"                   101             80.848                  100.16                   -0.83379       
+    "Remaining Fuel (kg)"                9             29.152                  9.8421                      9.357       
+    "Average Fuel Rate (kg/hr)"     14.809             11.854                  14.686                   -0.83379       
+
+            Stage             PublishedDuration_hr    SimDuration_hr    PublishedRange_km    SimDownrange_km    PublishedFuel_kg    SimFuel_kg    FuelPercentError
+    ______________________    ____________________    ______________    _________________    _______________    ________________    __________    ________________
+
+    "Climb"                           0.41                 0.41                  54               53.546                 7            9.1745           31.064     
+    "Cruise Out"                      2.04                 2.04                 450               448.78              24.5            31.884            30.14     
+    "Descent 1"                       0.17                 0.17                  28               27.944               2.5            0.9122          -63.512     
+    "Cruise Before Loiter"            0.15                 0.15                  30                29.99                 2            2.1396           6.9798     
+    "Loiter"                             1                    1                   0              0.28335              13.5            14.104           4.4705     
+    "Cruise After Loiter"             0.15                 0.15                  30                29.78                 2            2.1004           5.0198     
+    "Climb 2"                          0.2                  0.2                30.5               30.365               3.5            3.8958           11.309     
+    "Cruise Back"                     1.88                 1.88                 450               451.18             28.75            31.548           9.7308     
+    "Descent 2"                       0.82                 0.82               111.5               111.24              12.3               4.4          -64.227     
+
+
+TB2 CALIBRATED MISSION SUMMARY
+------------------------------
+Mission type                  : TB2-Class ISR Mission Calibrated by Masood-Wei Benchmark
+Transferred BSFC scale        : 1.2493
+Optimized transit speed       : 37.05 m/s (72.0 kt)
+Optimized loiter speed        : 34.20 m/s (66.5 kt)
+Best-range reference speed    : 40.62 m/s (79.0 kt)
+Best-endurance reference speed: 37.61 m/s (73.1 kt)
+Total mission time            : 6.20 hr
+Total mission path length     : 782.59 km
+Fuel used                     : 45.96 kg
+Fuel remaining                : 194.04 kg
+CO2 estimate                  : 145.25 kg
+
+        Stage         Duration_hr    CumulativeTime_hr    PathLength_km    CumulativePath_km    Downrange_km    CumulativeDownrange_km    FuelUsed_kg    CumulativeFuelUsed_kg    FuelEnergy_MJ    MeanPower_kW    MeanThrust_N    MeanAccel_mps2    MeanCL     MeanCD     MeanFuelFlow_kgs
+    ______________    ___________    _________________    _____________    _________________    ____________    ______________________    ___________    _____________________    _____________    ____________    ____________    ______________    ______    ________    ________________
+
+    "Takeoff"            0.0125            0.0125            1.4274             1.4274             1.4274               1.4274              0.21054             0.21054              9.0533           42.332            1063            0.10261      1.1985    0.072047       0.0047007    
+    "Climb"             0.16667           0.17917            21.184             22.611             21.184               22.611               3.9541              4.1646              170.03           59.326          1332.4          0.0047228      1.0981    0.065927       0.0065879    
+    "Transit Out"       0.89964            1.0788            120.01             142.62             120.01               142.62               6.7786              10.943              291.48           18.838          406.65        -0.00043997      1.1744    0.070326       0.0020919    
+    "Loiter ISR"              4            5.0788            492.51             635.13             0.7539               143.38               27.384              38.328              1177.5           17.128          400.62                  0      1.3441    0.081278        0.001902    
+    "Transit Home"      0.89964            5.9784            120.01             755.14             119.88               263.26               6.4594              44.787              277.75           17.945          387.38          0.0004393      1.1167    0.066941       0.0019928    
+    "Descent"           0.19444            6.1729            24.706             779.85             24.706               287.97               1.0434               45.83              44.865           13.423               0         -0.0046244      1.0405    0.062763       0.0014905    
+    "Landing"             0.025            6.1979            2.7405             782.59             2.7405               290.71              0.13415              45.965              5.7683           13.423          3.0881          -0.073684      1.2414    0.075037       0.0014905    
+

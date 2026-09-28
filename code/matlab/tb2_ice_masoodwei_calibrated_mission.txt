@@ -1,0 +1,1187 @@
+%% 
+%% TB2 ICE Mission Calibrated with Masood and Wei (2012)
+% This script uses the published fixed-wing UAV benchmark from:
+% Khayyam Masood and Zhang Wei,
+% "Detailed Flight Performance Analysis of a Fixed Wing UAV",
+% AIAA 2012-2595, DOI: 10.2514/6.2012-2595
+%
+% Workflow:
+% 1) Rebuild the paper's benchmark aircraft and 9-segment mission
+% 2) Compare our simplified mission model against the published results
+% 3) Calibrate the fuel-consumption model against the paper
+% 4) Compare variable-atmosphere and fixed-atmosphere mission results
+% 5) Transfer that calibration to the TB2-class specific ISR mission
+% 6) Plot stage-normalized results so each phase is equally readable
+
+clear; clc; close all;
+
+dt = 1.0; % s
+
+%% 1) Paper benchmark data
+paper = buildMasoodWeiBenchmark();
+paper.variableAtmosphere = makeAtmosphereModel(paper.aircraft, 'variable', 0);
+paperSimUncal = simulateSegmentedMission(paper.mission, paper.aircraft, dt, paper.variableAtmosphere);
+paper.calibration.bsfcScale = paper.published.totalFuelConsumed_kg / paperSimUncal.fuelUsed(end);
+paper.aircraft.BSFC = paper.aircraft.BSFC * paper.calibration.bsfcScale;
+paperSimVariable = simulateSegmentedMission(paper.mission, paper.aircraft, dt, paper.variableAtmosphere);
+paper.fixedAtmosphere = makeAtmosphereModel(paper.aircraft, 'fixed', mean(paperSimVariable.h));
+paperSimFixed = simulateSegmentedMission(paper.mission, paper.aircraft, dt, paper.fixedAtmosphere);
+
+paperTables = buildPaperComparisonTables(paper, paperSimVariable, paperSimUncal);
+paperStageVariableTable = buildStageMetricMatrix(paperSimVariable.stageSummary);
+paperStageFixedTable = buildStageMetricMatrix(paperSimFixed.stageSummary);
+paperSensitivityTable = buildAtmosphereSensitivityTable(paperSimVariable, paperSimFixed, paper.fixedAtmosphere.referenceAltitude_m, 'Paper Benchmark');
+paperOverallComparison = buildOverallComparisonTable(paper, paperSimVariable, paper.fixedAtmosphere);
+paperSensitivityDecision = summarizeAtmosphereImpact(paperSensitivityTable);
+
+%% 2) TB2-class mission with transferred calibration
+study = struct();
+study.missionName = 'TB2-Class ISR Mission Calibrated by Masood-Wei Benchmark';
+study.cruiseAltitude = 3000;      % m
+study.outboundRange_km = 120;     % km
+study.inboundRange_km = 120;      % km
+study.loiterDuration_min = 240;   % min
+study.climbDuration_s = 600;
+study.descentDuration_s = 700;
+study.normalizeStages = true;
+
+tb2 = buildTB2Model();
+tb2.BSFC = tb2.BSFC * paper.calibration.bsfcScale;
+
+VstallSL_tb2 = sqrt(2 * tb2.mass0 * tb2.g / (tb2.rhoSL * tb2.wingArea * tb2.CLmax));
+VTO_tb2 = 1.20 * VstallSL_tb2;
+Vapp_tb2 = 1.30 * VstallSL_tb2;
+Vmax_tb2 = tb2.maxSpeedKTAS * 0.514444;
+
+VbestRange_tb2 = computeBestRangeCruiseSpeed(tb2, study.cruiseAltitude, tb2.mass0, Vmax_tb2);
+VbestEndurance_tb2 = computeBestEnduranceCruiseSpeed(tb2, study.cruiseAltitude, tb2.mass0, Vmax_tb2);
+opt_tb2 = optimizeMissionSpeeds(tb2, study, VstallSL_tb2, Vmax_tb2);
+mission_tb2 = buildSpecificMissionDefinition(study, VstallSL_tb2, VTO_tb2, Vapp_tb2, opt_tb2);
+tb2.variableAtmosphere = makeAtmosphereModel(tb2, 'variable', 0);
+tb2SimVariable = simulateSegmentedMission(mission_tb2, tb2, dt, tb2.variableAtmosphere);
+tb2.fixedAtmosphere = makeAtmosphereModel(tb2, 'fixed', mean(tb2SimVariable.h));
+tb2SimFixed = simulateSegmentedMission(mission_tb2, tb2, dt, tb2.fixedAtmosphere);
+tb2PitchDeg = rad2deg(tb2SimVariable.gammaPath) + rad2deg(tb2SimVariable.CL / tb2.CLalpha);
+tb2Normalized = buildNormalizedStageProfiles(tb2SimVariable);
+tb2StageVariableTable = buildStageMetricMatrix(tb2SimVariable.stageSummary);
+tb2StageFixedTable = buildStageMetricMatrix(tb2SimFixed.stageSummary);
+tb2SensitivityTable = buildAtmosphereSensitivityTable(tb2SimVariable, tb2SimFixed, tb2.fixedAtmosphere.referenceAltitude_m, 'TB2 Mission');
+tb2SensitivityDecision = summarizeAtmosphereImpact(tb2SensitivityTable);
+tb2MissionOverviewTable = buildMissionOverviewTable(tb2, study, opt_tb2, tb2SimVariable, tb2SimFixed, tb2.fixedAtmosphere);
+
+%% 3) Console summary
+fprintf('\nMASOOD-WEI PAPER CALIBRATION SUMMARY\n');
+fprintf('------------------------------------\n');
+fprintf('Published total fuel used            : %.2f kg\n', paper.published.totalFuelConsumed_kg);
+fprintf('Uncalibrated simulated fuel used     : %.2f kg\n', paperSimUncal.fuelUsed(end));
+fprintf('Calibrated simulated fuel used       : %.2f kg\n', paperSimVariable.fuelUsed(end));
+fprintf('Applied BSFC scale factor            : %.4f\n', paper.calibration.bsfcScale);
+fprintf('Published total range                : %.2f km\n', paper.published.totalRange_km);
+fprintf('Calibrated simulated total range     : %.2f km\n', paperSimVariable.stageSummary.CumulativeDownrange_km(end));
+fprintf('Fixed-atmosphere reference altitude  : %.0f m\n\n', paper.fixedAtmosphere.referenceAltitude_m);
+fprintf('Paper benchmark max key-output difference (fixed vs variable): %.2f %%\n', paperSensitivityDecision.maxKeyPercentDifference);
+fprintf('Paper benchmark atmosphere decision                      : %s\n\n', paperSensitivityDecision.recommendation);
+
+disp(paperTables.total);
+disp(paperTables.stages);
+disp(paperOverallComparison);
+disp(paperSensitivityTable);
+disp(paperStageVariableTable);
+disp(paperStageFixedTable);
+fprintf('\nTB2 CALIBRATED MISSION SUMMARY\n');
+fprintf('------------------------------\n');
+fprintf('Mission type                  : %s\n', study.missionName);
+fprintf('Transferred BSFC scale        : %.4f\n', paper.calibration.bsfcScale);
+fprintf('Optimized transit speed       : %.2f m/s (%.1f kt)\n', opt_tb2.Vtransit, opt_tb2.Vtransit / 0.514444);
+fprintf('Optimized loiter speed        : %.2f m/s (%.1f kt)\n', opt_tb2.Vloiter, opt_tb2.Vloiter / 0.514444);
+fprintf('Best-range reference speed    : %.2f m/s (%.1f kt)\n', VbestRange_tb2, VbestRange_tb2 / 0.514444);
+fprintf('Best-endurance reference speed: %.2f m/s (%.1f kt)\n', VbestEndurance_tb2, VbestEndurance_tb2 / 0.514444);
+fprintf('Total mission time            : %.2f hr\n', tb2SimVariable.t(end) / 3600);
+fprintf('Total mission path length     : %.2f km\n', tb2SimVariable.stageSummary.CumulativePath_km(end));
+fprintf('Fuel used                     : %.2f kg\n', tb2SimVariable.fuelUsed(end));
+fprintf('Fuel remaining                : %.2f kg\n', tb2SimVariable.fuelMass(end));
+fprintf('CO2 estimate                  : %.2f kg\n', tb2SimVariable.CO2cum(end));
+fprintf('Fixed-atmosphere reference altitude  : %.0f m\n\n', tb2.fixedAtmosphere.referenceAltitude_m);
+fprintf('TB2 mission max key-output difference (fixed vs variable): %.2f %%\n', tb2SensitivityDecision.maxKeyPercentDifference);
+fprintf('TB2 mission atmosphere decision                      : %s\n\n', tb2SensitivityDecision.recommendation);
+
+disp(tb2SimVariable.stageSummary);
+disp(tb2MissionOverviewTable);
+disp(tb2SensitivityTable);
+disp(tb2StageVariableTable);
+disp(tb2StageFixedTable);
+
+%% 4) Figures - Paper benchmark
+paperColors = lines(numel(paperSimVariable.phaseNames));
+
+figure('Name','Masood-Wei Benchmark: Published vs Simulated','Color','w');
+tiledlayout(2,2, 'TileSpacing', 'compact', 'Padding', 'compact');
+
+nexttile;
+bar(categorical(["Published","Uncalibrated","Calibrated"]), ...
+    [paper.published.totalFuelConsumed_kg, paperSimUncal.fuelUsed(end), paperSimVariable.fuelUsed(end)]);
+grid on;
+ylabel('Fuel used (kg)');
+title('Total Fuel Comparison');
+
+nexttile;
+bar(categorical(paper.phaseNames), [paper.published.stageFuel_kg(:), paperSimVariable.stageSummary.FuelUsed_kg], 'grouped');
+grid on;
+ylabel('Stage fuel used (kg)');
+title('Stage Fuel: Published vs Simulated');
+legend('Published','Simulated','Location','best');
+
+nexttile;
+plot(paperSimVariable.t/3600, paperSimVariable.h/1000, 'LineWidth', 2, 'Color', [0.00 0.45 0.74]); hold on;
+stairs(paper.published.cumulativeStageEnd_hr, paper.published.finalHeight_km, '--', 'Color', [0.85 0.33 0.10], 'LineWidth', 1.8);
+grid on;
+xlabel('Time (hr)');
+ylabel('Altitude (km)');
+title('Altitude Profile Comparison');
+legend('Simulated','Published stage endpoints','Location','best');
+annotatePhasesHours(gca, paperSimVariable.phaseEdges, paperSimVariable.phaseNames);
+
+nexttile;
+plot(paperSimVariable.t/3600, paperSimVariable.ThrustReq/1000, 'LineWidth', 2, 'Color', [0.64 0.08 0.18]);
+grid on;
+xlabel('Time (hr)');
+ylabel('Thrust (kN)');
+title('Simulated Thrust History');
+annotatePhasesHours(gca, paperSimVariable.phaseEdges, paperSimVariable.phaseNames);
+
+figure('Name','Masood-Wei Benchmark Mission','Color','w');
+subplot(2,2,1);
+plot(paperSimVariable.t/3600, paperSimVariable.V * 3.6, 'LineWidth', 2, 'Color', [0.00 0.45 0.74]); hold on;
+plot(paperSimVariable.t/3600, paperSimVariable.VstallTime * 3.6, '--', 'LineWidth', 1.5, 'Color', [0.30 0.30 0.30]);
+grid on;
+xlabel('Time (hr)');
+ylabel('Velocity (km/hr)');
+title('Velocity vs Time');
+legend('Actual velocity','Stall velocity','Location','best');
+annotatePhasesHours(gca, paperSimVariable.phaseEdges, paperSimVariable.phaseNames);
+
+subplot(2,2,2);
+plot3(paperSimVariable.x/1000, paperSimVariable.y/1000, paperSimVariable.h/1000, 'LineWidth', 2, 'Color', [0.85 0.33 0.10]);
+grid on; view(3);
+xlabel('Range (km)');
+ylabel('Side range (km)');
+zlabel('Height (km)');
+title('3D Mission Profile');
+
+subplot(2,2,3);
+plot(paperSimVariable.t/3600, paperSimVariable.mass, 'LineWidth', 2, 'Color', [0.47 0.67 0.19]);
+grid on;
+xlabel('Time (hr)');
+ylabel('Mass (kg)');
+title('Mass vs Time');
+annotatePhasesHours(gca, paperSimVariable.phaseEdges, paperSimVariable.phaseNames);
+
+subplot(2,2,4);
+plot(paperSimVariable.t/3600, 100 * paperSimVariable.PowerUsed / paper.aircraft.enginePowerMax, 'LineWidth', 2, 'Color', [0.49 0.18 0.56]);
+grid on;
+xlabel('Time (hr)');
+ylabel('Throttle proxy (%)');
+title('Power Fraction vs Time');
+annotatePhasesHours(gca, paperSimVariable.phaseEdges, paperSimVariable.phaseNames);
+
+figure('Name','Atmosphere Sensitivity Comparison','Color','w');
+tiledlayout(2,2, 'TileSpacing', 'compact', 'Padding', 'compact');
+
+tb2FuelIdx = strcmp(tb2SensitivityTable.Metric, "FuelUsed_kg");
+tb2PathIdx = strcmp(tb2SensitivityTable.Metric, "PathLength_km");
+tb2DownrangeIdx = strcmp(tb2SensitivityTable.Metric, "Downrange_km");
+
+nexttile;
+bar(categorical(["Variable","Fixed"]), [paperSimVariable.fuelUsed(end), paperSimFixed.fuelUsed(end)]);
+grid on;
+ylabel('Fuel used (kg)');
+title('Paper Benchmark Fuel Use');
+
+nexttile;
+bar(categorical(["Variable","Fixed"]), [tb2SimVariable.fuelUsed(end), tb2SimFixed.fuelUsed(end)]);
+grid on;
+ylabel('Fuel used (kg)');
+title('TB2 Mission Fuel Use');
+
+nexttile;
+bar(categorical(tb2SimVariable.phaseNames), [tb2SimVariable.stageSummary.FuelUsed_kg, tb2SimFixed.stageSummary.FuelUsed_kg], 'grouped');
+grid on;
+ylabel('Fuel used by stage (kg)');
+title('TB2 Stage Fuel: Variable vs Fixed Atmosphere');
+legend('Variable atmosphere','Fixed atmosphere','Location','best');
+
+nexttile;
+bar(categorical(["Fuel used","Path length","Downrange"]), ...
+    [tb2SensitivityTable.VariableAtmosphere(tb2FuelIdx), tb2SensitivityTable.FixedAtmosphere(tb2FuelIdx); ...
+     tb2SensitivityTable.VariableAtmosphere(tb2PathIdx), tb2SensitivityTable.FixedAtmosphere(tb2PathIdx); ...
+     tb2SensitivityTable.VariableAtmosphere(tb2DownrangeIdx), tb2SensitivityTable.FixedAtmosphere(tb2DownrangeIdx)]);
+grid on;
+ylabel('Metric value');
+title('TB2 Overall Sensitivity Snapshot');
+legend('Variable','Fixed','Location','best');
+
+%% 5) Figures - TB2 mission
+tb2Colors = lines(numel(tb2SimVariable.phaseNames));
+
+figure('Name','TB2 Calibrated Specific Mission','Color','w');
+subplot(2,1,1);
+plot(tb2SimVariable.t/60, tb2SimVariable.h, 'LineWidth', 2, 'Color', [0.00 0.45 0.74]);
+grid on;
+xlabel('Time (min)');
+ylabel('Altitude (m)');
+title('TB2-Specific Mission Profile After Paper Calibration');
+annotatePhases(gca, tb2SimVariable.phaseEdges, tb2SimVariable.phaseNames);
+
+subplot(2,1,2);
+plot(tb2SimVariable.t/60, tb2SimVariable.V, 'LineWidth', 2, 'Color', [0.85 0.33 0.10]); hold on;
+plot(tb2SimVariable.t/60, tb2SimVariable.VstallTime, '--', 'LineWidth', 1.5, 'Color', [0.30 0.30 0.30]);
+yline(VbestRange_tb2, ':', 'V_{range,opt}', 'LabelHorizontalAlignment', 'left');
+yline(VbestEndurance_tb2, ':', 'V_{endurance,opt}', 'LabelHorizontalAlignment', 'left');
+grid on;
+xlabel('Time (min)');
+ylabel('Velocity (m/s)');
+title('TB2 Velocity Schedule');
+annotatePhases(gca, tb2SimVariable.phaseEdges, tb2SimVariable.phaseNames);
+
+figure('Name','TB2 Calibrated Mission Energy','Color','w');
+subplot(2,1,1);
+plot(tb2SimVariable.t/60, tb2SimVariable.fuelEnergyCumMJ, 'LineWidth', 2, 'Color', [0.49 0.18 0.56]); hold on;
+yyaxis right;
+plot(tb2SimVariable.t/60, tb2SimVariable.fuelUsed, 'LineWidth', 2, 'Color', [0.20 0.60 0.20]);
+yyaxis left;
+ylabel('Fuel energy (MJ)');
+yyaxis right;
+ylabel('Fuel used (kg)');
+xlabel('Time (min)');
+grid on;
+title('TB2 Mission Energy Consumption');
+annotatePhases(gca, tb2SimVariable.phaseEdges, tb2SimVariable.phaseNames);
+
+subplot(2,1,2);
+b = bar(categorical(tb2SimVariable.phaseNames), tb2SimVariable.stageSummary.FuelUsed_kg, 'FaceColor', 'flat');
+for i = 1:numel(tb2SimVariable.phaseNames)
+    b.CData(i,:) = tb2Colors(i,:);
+end
+grid on;
+ylabel('Fuel used by stage (kg)');
+title('TB2 Fuel Use by Stage');
+
+figure('Name','TB2 Calibrated Mission Normalized Stages','Color','w');
+tiledlayout(2,2, 'TileSpacing', 'compact', 'Padding', 'compact');
+
+nexttile;
+plot(tb2Normalized.equalStageTime, tb2Normalized.V, 'LineWidth', 2, 'Color', [0.85 0.33 0.10]);
+grid on;
+xlabel('Equalized stage axis');
+ylabel('Velocity (m/s)');
+title('Velocity on Normalized Stage Time');
+annotateEqualStages(gca, tb2Normalized.numStages, tb2SimVariable.phaseNames);
+
+nexttile;
+plot(tb2Normalized.equalStageTime, tb2Normalized.fuelFlow, 'LineWidth', 2, 'Color', [0.20 0.60 0.20]);
+grid on;
+xlabel('Equalized stage axis');
+ylabel('Fuel flow (kg/s)');
+title('Fuel Flow on Normalized Stage Time');
+annotateEqualStages(gca, tb2Normalized.numStages, tb2SimVariable.phaseNames);
+
+nexttile;
+plot(tb2Normalized.equalStageTime, tb2Normalized.ThrustReq, 'LineWidth', 2, 'Color', [0.64 0.08 0.18]);
+grid on;
+xlabel('Equalized stage axis');
+ylabel('Thrust (N)');
+title('Thrust on Normalized Stage Time');
+annotateEqualStages(gca, tb2Normalized.numStages, tb2SimVariable.phaseNames);
+nexttile;
+plot(tb2Normalized.equalStageTime, tb2Normalized.fuelUsed, 'LineWidth', 2, 'Color', [0.49 0.18 0.56]);
+grid on;
+xlabel('Equalized stage axis');
+ylabel('Cumulative fuel used (kg)');
+title('Cumulative Fuel on Normalized Stage Time');
+annotateEqualStages(gca, tb2Normalized.numStages, tb2SimVariable.phaseNames);
+
+figure('Name','TB2 Speed Optimization After Calibration','Color','w');
+subplot(2,1,1);
+plot(opt_tb2.transitCandidates, opt_tb2.transitFuelPerKm, 'LineWidth', 2, 'Color', [0.00 0.45 0.74]); hold on;
+xline(opt_tb2.Vtransit, '--', 'Selected transit speed', 'LabelHorizontalAlignment', 'left');
+grid on;
+xlabel('Transit speed (m/s)');
+ylabel('Fuel per km (kg/km)');
+title('Transit-Speed Optimization');
+
+subplot(2,1,2);
+plot(opt_tb2.loiterCandidates, opt_tb2.loiterFuelPerHour, 'LineWidth', 2, 'Color', [0.85 0.33 0.10]); hold on;
+xline(opt_tb2.Vloiter, '--', 'Selected loiter speed', 'LabelHorizontalAlignment', 'left');
+grid on;
+xlabel('Loiter speed (m/s)');
+ylabel('Fuel per hour (kg/hr)');
+title('Loiter-Speed Optimization');
+
+%% 6) Export results
+results = struct();
+results.paper = paper;
+results.paperSimUncalibrated = paperSimUncal;
+results.paperSimVariable = paperSimVariable;
+results.paperSimFixed = paperSimFixed;
+results.paperTables = paperTables;
+results.paperStageVariableTable = paperStageVariableTable;
+results.paperStageFixedTable = paperStageFixedTable;
+results.paperSensitivityTable = paperSensitivityTable;
+results.paperOverallComparison = paperOverallComparison;
+results.paperSensitivityDecision = paperSensitivityDecision;
+results.tb2 = tb2;
+results.study = study;
+results.tb2SimVariable = tb2SimVariable;
+results.tb2SimFixed = tb2SimFixed;
+results.tb2Normalized = tb2Normalized;
+results.tb2Optimization = opt_tb2;
+results.tb2PitchDeg = tb2PitchDeg;
+results.tb2StageVariableTable = tb2StageVariableTable;
+results.tb2StageFixedTable = tb2StageFixedTable;
+results.tb2SensitivityTable = tb2SensitivityTable;
+results.tb2SensitivityDecision = tb2SensitivityDecision;
+results.tb2MissionOverviewTable = tb2MissionOverviewTable;
+
+%% Local functions
+function paper = buildMasoodWeiBenchmark()
+paper = struct();
+paper.reference = 'Masood and Wei (2012), AIAA 2012-2595';
+
+% Aircraft data extracted from Tables 1-3 and the text
+p = struct();
+p.g = 9.81;
+p.rhoSL = 1.225;
+p.T0 = 288.15;
+p.P0 = 101325;
+p.R = 287.05;
+p.gammaAir = 1.4;
+p.mass0 = 540;
+p.fuelMass0 = 110;
+p.dryMass = p.mass0 - p.fuelMass0;
+p.wingspan = 9.0;           % inferred from rectangular wing, area 9 m^2, chord 1 m
+p.length = 6.3;
+p.wingArea = 9.0;
+p.CLmax = 1.55;             % approximated from paper's NACA4412 whole-aircraft curve
+p.CD0 = 0.035;              % approximated from paper's CFD drag trend
+p.oswald = 0.80;
+p.aspectRatio = p.wingspan^2 / p.wingArea;
+p.kInduced = 1 / (pi * p.oswald * p.aspectRatio);
+p.enginePowerHP = 100;
+p.enginePowerMax = p.enginePowerHP * 745.7;
+p.etaProp = 0.72;           % starting value before BSFC calibration
+p.BSFC = 0.32;              % base value, later calibrated to the paper
+p.LHV = 43e6;
+p.CO2factor = 3.16;
+p.idlePowerFrac = 0.18;
+p.CLalpha = 5.7;
+
+paper.aircraft = p;
+
+% Published benchmark mission from Table 5
+dur_hr = [0.41 2.04 0.17 0.15 1.00 0.15 0.20 1.88 0.82];
+dur_s = dur_hr * 3600;
+segRange_km = [54 450 28 30 0 30 30.5 450 111.5];
+initH_km = [0.01 7.0 7.0 5.0 5.0 5.0 5.0 8.0 8.0];
+finalH_km = [7.0 7.0 5.0 5.0 5.0 5.0 8.0 8.0 0.01];
+publishedVel_kmh = [NaN 220 NaN 200 200 200 NaN 240 NaN];
+
+% Where the paper does not tabulate speed directly, derive an average from
+% segment range and duration. This is documented so it is report-ready.
+derivedVel_kmh = segRange_km ./ max(dur_hr, eps);
+derivedVel_kmh(5) = 200; % loiter speed explicitly given in Table 5
+V_kmh = publishedVel_kmh;
+V_kmh(isnan(V_kmh)) = derivedVel_kmh(isnan(V_kmh));
+
+names = {'Climb','Cruise Out','Descent 1','Cruise Before Loiter','Loiter', ...
+         'Cruise After Loiter','Climb 2','Cruise Back','Descent 2'};
+
+for i = 1:numel(names)
+    mission(i) = struct( ... %#ok<AGROW>
+        'name', names{i}, ...
+        'duration', dur_s(i), ...
+        'h0', initH_km(i) * 1000, ...
+        'h1', finalH_km(i) * 1000, ...
+        'V0', V_kmh(i) / 3.6, ...
+        'V1', V_kmh(i) / 3.6, ...
+        'mode', ternary(strcmp(names{i}, 'Loiter'), 'loiter', 'straight'), ...
+        'loiterRadius', ternary(strcmp(names{i}, 'Loiter'), 700, 0));
+end
+
+paper.mission = mission;
+paper.phaseNames = names;
+paper.published = struct();
+paper.published.segmentDuration_hr = dur_hr(:);
+paper.published.segmentRange_km = segRange_km(:);
+paper.published.initialHeight_km = initH_km(:);
+paper.published.finalHeight_km = finalH_km(:);
+paper.published.cruiseVelocity_kmh = V_kmh(:);
+paper.published.stageFuel_kg = [7 24.5 2.5 2 13.5 2 3.5 28.75 12.3].';
+paper.published.initialMass_kg = [540 533 503.5 501 499 485.5 483.5 480 451.25].';
+paper.published.finalMass_kg = [533 503.5 501 499 485.5 483.5 480 451.25 439].';
+paper.published.totalTime_hr = 6.82;
+paper.published.totalRange_km = 1184;
+paper.published.totalFuelConsumed_kg = 101;
+paper.published.remainingFuel_kg = 9;
+paper.published.cumulativeStageEnd_hr = cumsum(dur_hr(:));
+paper.notes = [ ...
+    "Loiter segment speed is explicitly reported as 200 km/hr."; ...
+    "The paper's loiter segment range row appears inconsistent with the total range row; here we treat loiter as near-zero net downrange with finite flown path length."; ...
+    "Missing segment cruise speeds are reconstructed from published stage range divided by stage duration." ...
+    ];
+end
+
+function tb2 = buildTB2Model()
+tb2 = struct();
+tb2.g = 9.81;
+tb2.rhoSL = 1.225;
+tb2.T0 = 288.15;
+tb2.P0 = 101325;
+tb2.R = 287.05;
+tb2.gammaAir = 1.4;
+tb2.MTOW = 700;
+tb2.wingspan = 12.0;
+tb2.length = 6.5;
+tb2.wingArea = 9.27;
+tb2.mass0 = 700;
+tb2.fuelMass0 = 240;
+tb2.dryMass = tb2.mass0 - tb2.fuelMass0;
+tb2.CLmax = 1.80;
+tb2.CD0 = 0.035;
+tb2.oswald = 0.80;
+tb2.aspectRatio = tb2.wingspan^2 / tb2.wingArea;
+tb2.kInduced = 1 / (pi * tb2.oswald * tb2.aspectRatio);
+tb2.enginePowerHP = 100;
+tb2.enginePowerMax = tb2.enginePowerHP * 745.7;
+tb2.maxSpeedKTAS = 110;
+tb2.cruiseSpeedKTAS = 90;
+tb2.operationalAltitude_ft = 16000;
+tb2.endurance_hr_public = 20;
+tb2.etaProp = 0.80;
+tb2.BSFC = 0.32;
+tb2.LHV = 43e6;
+tb2.CO2factor = 3.16;
+tb2.idlePowerFrac = 0.18;
+tb2.CLalpha = 5.7;
+end
+
+function tables = buildPaperComparisonTables(paper, simCal, simUncal)
+names = ["Total Time (hr)"; "Total Range (km)"; "Fuel Used (kg)"; "Remaining Fuel (kg)"; "Average Fuel Rate (kg/hr)"];
+published = [ ...
+    paper.published.totalTime_hr; ...
+    paper.published.totalRange_km; ...
+    paper.published.totalFuelConsumed_kg; ...
+    paper.published.remainingFuel_kg; ...
+    paper.published.totalFuelConsumed_kg / paper.published.totalTime_hr];
+uncal = [ ...
+    simUncal.t(end) / 3600; ...
+    simUncal.stageSummary.CumulativeDownrange_km(end); ...
+    simUncal.fuelUsed(end); ...
+    simUncal.fuelMass(end); ...
+    simUncal.fuelUsed(end) / (simUncal.t(end) / 3600)];
+cal = [ ...
+    simCal.t(end) / 3600; ...
+    simCal.stageSummary.CumulativeDownrange_km(end); ...
+    simCal.fuelUsed(end); ...
+    simCal.fuelMass(end); ...
+    simCal.fuelUsed(end) / (simCal.t(end) / 3600)];
+
+total = table(names, published, uncal, cal, ...
+    100 * (cal - published) ./ max(abs(published), eps), ...
+    'VariableNames', {'Metric','Published','SimulatedUncalibrated','SimulatedCalibrated','PercentError_Calibrated'});
+
+stageNames = string({paper.mission.name}).';
+stages = table( ...
+    stageNames, ...
+    paper.published.segmentDuration_hr, ...
+    simCal.stageSummary.Duration_hr, ...
+    paper.published.segmentRange_km, ...
+    simCal.stageSummary.Downrange_km, ...
+    paper.published.stageFuel_kg, ...
+    simCal.stageSummary.FuelUsed_kg, ...
+    100 * (simCal.stageSummary.FuelUsed_kg - paper.published.stageFuel_kg) ./ max(abs(paper.published.stageFuel_kg), eps), ...
+    'VariableNames', {'Stage','PublishedDuration_hr','SimDuration_hr','PublishedRange_km','SimDownrange_km','PublishedFuel_kg','SimFuel_kg','FuelPercentError'});
+
+tables = struct();
+tables.total = total;
+tables.stages = stages;
+end
+
+function mission = buildSpecificMissionDefinition(study, VstallSL, VTO, Vapp, optSummary)
+transitDuration = study.outboundRange_km * 1000 / optSummary.Vtransit;
+returnDuration = study.inboundRange_km * 1000 / optSummary.Vtransit;
+loiterDuration = study.loiterDuration_min * 60;
+
+mission(1) = struct('name','Takeoff','duration',45,'h0',0,'h1',120,'V0',0.95 * VTO,'V1',1.10 * VTO,'mode','straight','loiterRadius',0);
+mission(2) = struct('name','Climb','duration',study.climbDuration_s,'h0',120,'h1',study.cruiseAltitude,'V0',1.10 * VTO,'V1',min(optSummary.Vtransit, 42),'mode','straight','loiterRadius',0);
+mission(3) = struct('name','Transit Out','duration',transitDuration,'h0',study.cruiseAltitude,'h1',study.cruiseAltitude,'V0',optSummary.Vtransit,'V1',optSummary.Vtransit,'mode','straight','loiterRadius',0);
+mission(4) = struct('name','Loiter ISR','duration',loiterDuration,'h0',study.cruiseAltitude,'h1',study.cruiseAltitude,'V0',optSummary.Vloiter,'V1',optSummary.Vloiter,'mode','loiter','loiterRadius',1000);
+mission(5) = struct('name','Transit Home','duration',returnDuration,'h0',study.cruiseAltitude,'h1',study.cruiseAltitude,'V0',optSummary.Vtransit,'V1',optSummary.Vtransit,'mode','straight','loiterRadius',0);
+mission(6) = struct('name','Descent','duration',study.descentDuration_s,'h0',study.cruiseAltitude,'h1',150,'V0',optSummary.Vtransit,'V1',34,'mode','straight','loiterRadius',0);
+mission(7) = struct('name','Landing','duration',90,'h0',150,'h1',0,'V0',Vapp,'V1',1.05 * VstallSL,'mode','straight','loiterRadius',0);
+end
+
+function VbestRange = computeBestRangeCruiseSpeed(p, cruiseAltitude, massGuess, Vmax)
+[~, ~, rhoCruise, ~] = isaTroposphere(cruiseAltitude, p);
+VstallCruise = sqrt(2 * massGuess * p.g / (rhoCruise * p.wingArea * p.CLmax));
+VminSearch = max(1.35 * VstallCruise, 22);
+VmaxSearch = min(0.95 * Vmax, 60);
+if VmaxSearch <= VminSearch
+    VmaxSearch = VminSearch + 5;
+end
+Vgrid = linspace(VminSearch, VmaxSearch, 300);
+dragMetric = zeros(size(Vgrid));
+for i = 1:numel(Vgrid)
+    perf = computeSteadyLevelMetrics(p, Vgrid(i), cruiseAltitude, massGuess);
+    dragMetric(i) = perf.drag;
+end
+[~, idxBest] = min(dragMetric);
+VbestRange = Vgrid(idxBest);
+end
+
+function VbestEndurance = computeBestEnduranceCruiseSpeed(p, cruiseAltitude, massGuess, Vmax)
+[~, ~, rhoCruise, ~] = isaTroposphere(cruiseAltitude, p);
+VstallCruise = sqrt(2 * massGuess * p.g / (rhoCruise * p.wingArea * p.CLmax));
+VminSearch = max(1.25 * VstallCruise, 20);
+VmaxSearch = min(0.92 * Vmax, 55);
+if VmaxSearch <= VminSearch
+    VmaxSearch = VminSearch + 5;
+end
+Vgrid = linspace(VminSearch, VmaxSearch, 300);
+powerMetric = zeros(size(Vgrid));
+for i = 1:numel(Vgrid)
+    perf = computeSteadyLevelMetrics(p, Vgrid(i), cruiseAltitude, massGuess);
+    powerMetric(i) = perf.powerUsed;
+end
+[~, idxBest] = min(powerMetric);
+VbestEndurance = Vgrid(idxBest);
+end
+
+function optSummary = optimizeMissionSpeeds(p, study, VstallSL, Vmax)
+massGuess = p.mass0 - 0.30 * p.fuelMass0;
+[~, ~, rhoCruise, ~] = isaTroposphere(study.cruiseAltitude, p);
+VstallCruise = sqrt(2 * massGuess * p.g / (rhoCruise * p.wingArea * p.CLmax));
+transitCandidates = linspace(max(1.30 * VstallCruise, 24), min(0.95 * Vmax, 58), 120);
+loiterCandidates = linspace(max(1.20 * VstallCruise, 22), min(0.85 * Vmax, 50), 120);
+transitFuelPerKm = zeros(size(transitCandidates));
+loiterFuelPerHour = zeros(size(loiterCandidates));
+for i = 1:numel(transitCandidates)
+    perf = computeSteadyLevelMetrics(p, transitCandidates(i), study.cruiseAltitude, massGuess);
+    transitFuelPerKm(i) = 1000 * perf.fuelFlow / max(transitCandidates(i), eps);
+end
+for i = 1:numel(loiterCandidates)
+    perf = computeSteadyLevelMetrics(p, loiterCandidates(i), study.cruiseAltitude, massGuess);
+    loiterFuelPerHour(i) = 3600 * perf.fuelFlow;
+end
+[~, idxTransit] = min(transitFuelPerKm);
+[~, idxLoiter] = min(loiterFuelPerHour);
+optSummary = struct();
+optSummary.Vtransit = transitCandidates(idxTransit);
+optSummary.Vloiter = loiterCandidates(idxLoiter);
+optSummary.transitCandidates = transitCandidates;
+optSummary.loiterCandidates = loiterCandidates;
+optSummary.transitFuelPerKm = transitFuelPerKm;
+optSummary.loiterFuelPerHour = loiterFuelPerHour;
+optSummary.VstallCruise = VstallCruise;
+optSummary.VstallSL = VstallSL;
+end
+
+function perf = computeSteadyLevelMetrics(p, V, altitude, massGuess)
+[~, ~, rho, ~] = isaTroposphere(altitude, p);
+q = 0.5 * rho * V^2;
+lift = massGuess * p.g;
+CL = lift / max(q * p.wingArea, eps);
+CD = p.CD0 + p.kInduced * CL^2;
+drag = q * p.wingArea * CD;
+thrustReq = drag;
+powerReq = thrustReq * V / p.etaProp;
+powerUsed = min(max(powerReq, p.idlePowerFrac * p.enginePowerMax), p.enginePowerMax);
+fuelFlow = p.BSFC * (powerUsed / 1000) / 3600;
+perf = struct('CL',CL,'CD',CD,'drag',drag,'thrustReq',thrustReq,'powerReq',powerReq,'powerUsed',powerUsed,'fuelFlow',fuelFlow);
+end
+
+function sim = simulateSegmentedMission(mission, p, dt, atmModel)
+[t, V, h, phaseIdx, phaseNames, phaseEdges, modeIdx, loiterRadius] = buildMissionProfile(mission, dt);
+
+V = max(V, 0.1);
+h = max(h, 0);
+hdot = gradient(h, dt);
+gammaPath = asin(max(min(hdot ./ max(V, 0.1), 0.95), -0.95));
+Vh = sqrt(max(V.^2 - hdot.^2, 0));
+aLong = gradient(V, dt);
+
+[tempK, pressurePa, rho, aSound] = evaluateAtmosphere(h, p, atmModel);
+mach = V ./ aSound;
+
+N = numel(t);
+x = zeros(N,1);
+y = zeros(N,1);
+pathS = zeros(N,1);
+heading = zeros(N,1);
+
+for k = 1:(N-1)
+    pathS(k+1) = pathS(k) + Vh(k) * dt;
+    if modeIdx(k) == 2
+        omega = Vh(k) / max(loiterRadius(k), 1);
+        heading(k+1) = heading(k) + omega * dt;
+    else
+        heading(k+1) = 0;
+    end
+    x(k+1) = x(k) + Vh(k) * cos(heading(k)) * dt;
+    y(k+1) = y(k) + Vh(k) * sin(heading(k)) * dt;
+end
+
+mass = zeros(N,1);
+fuelMass = zeros(N,1);
+fuelUsed = zeros(N,1);
+CL = zeros(N,1);
+CD = zeros(N,1);
+Lift = zeros(N,1);
+Drag = zeros(N,1);
+ThrustReq = zeros(N,1);
+PowerReq = zeros(N,1);
+PowerUsed = zeros(N,1);
+fuelFlow = zeros(N,1);
+fuelEnergyRate = zeros(N,1);
+fuelEnergyCum = zeros(N,1);
+CO2cum = zeros(N,1);
+LD = zeros(N,1);
+thrustAvailable = zeros(N,1);
+
+mass(1) = p.mass0;
+fuelMass(1) = p.fuelMass0;
+
+for k = 1:N
+    mNow = mass(k);
+    q = 0.5 * rho(k) * V(k)^2;
+    Lift(k) = mNow * p.g * cos(gammaPath(k));
+    CL(k) = Lift(k) / max(q * p.wingArea, eps);
+    CD(k) = p.CD0 + p.kInduced * CL(k)^2;
+    Drag(k) = q * p.wingArea * CD(k);
+
+    thrustRaw = Drag(k) + mNow * aLong(k) + mNow * p.g * sin(gammaPath(k));
+    ThrustReq(k) = max(thrustRaw, 0);
+    PowerReq(k) = ThrustReq(k) * V(k) / p.etaProp;
+    thrustAvailable(k) = p.etaProp * p.enginePowerMax / max(V(k), 8);
+    PowerUsed(k) = min(max(PowerReq(k), p.idlePowerFrac * p.enginePowerMax), p.enginePowerMax);
+    fuelFlow(k) = p.BSFC * (PowerUsed(k) / 1000) / 3600;
+    fuelEnergyRate(k) = fuelFlow(k) * p.LHV;
+    LD(k) = Lift(k) / max(Drag(k), 1e-6);
+
+    if k < N
+        fuelUsed(k+1) = fuelUsed(k) + fuelFlow(k) * dt;
+        fuelMass(k+1) = max(p.fuelMass0 - fuelUsed(k+1), 0);
+        mass(k+1) = p.dryMass + fuelMass(k+1);
+        fuelEnergyCum(k+1) = fuelEnergyCum(k) + fuelEnergyRate(k) * dt;
+        CO2cum(k+1) = fuelUsed(k+1) * p.CO2factor;
+    end
+end
+
+fuelEnergyCumMJ = fuelEnergyCum / 1e6;
+VstallTime = sqrt(2 * mass * p.g ./ max(rho * p.wingArea * p.CLmax, 1e-6));
+
+numPhases = numel(phaseNames);
+stageDuration_hr = zeros(numPhases,1);
+stagePathKm = zeros(numPhases,1);
+stageDownrangeKm = zeros(numPhases,1);
+stageFuelKg = zeros(numPhases,1);
+stageEnergyMJ = zeros(numPhases,1);
+stageMeanPowerkW = zeros(numPhases,1);
+stageMeanThrustN = zeros(numPhases,1);
+stageMeanAccel = zeros(numPhases,1);
+stageMeanCL = zeros(numPhases,1);
+stageMeanCD = zeros(numPhases,1);
+stageMeanFuelFlow = zeros(numPhases,1);
+
+for i = 1:numPhases
+    idx = find(phaseIdx == i);
+    tStart = phaseEdges(i);
+    tEnd = phaseEdges(i + 1);
+    xStart = interp1(t, x, tStart, 'linear', 'extrap');
+    xEnd = interp1(t, x, tEnd, 'linear', 'extrap');
+    sStart = interp1(t, pathS, tStart, 'linear', 'extrap');
+    sEnd = interp1(t, pathS, tEnd, 'linear', 'extrap');
+    fuelStart = interp1(t, fuelUsed, tStart, 'linear', 'extrap');
+    fuelEnd = interp1(t, fuelUsed, tEnd, 'linear', 'extrap');
+    energyStart = interp1(t, fuelEnergyCumMJ, tStart, 'linear', 'extrap');
+    energyEnd = interp1(t, fuelEnergyCumMJ, tEnd, 'linear', 'extrap');
+
+    stageDuration_hr(i) = (tEnd - tStart) / 3600;
+    stagePathKm(i) = (sEnd - sStart) / 1000;
+    stageDownrangeKm(i) = (xEnd - xStart) / 1000;
+    stageFuelKg(i) = fuelEnd - fuelStart;
+    stageEnergyMJ(i) = energyEnd - energyStart;
+    stageMeanPowerkW(i) = mean(PowerUsed(idx)) / 1000;
+    stageMeanThrustN(i) = mean(ThrustReq(idx));
+    stageMeanAccel(i) = mean(aLong(idx));
+    stageMeanCL(i) = mean(CL(idx));
+    stageMeanCD(i) = mean(CD(idx));
+    stageMeanFuelFlow(i) = mean(fuelFlow(idx));
+end
+stageSummary = table( ...
+    string(phaseNames(:)), ...
+    stageDuration_hr, ...
+    cumsum(stageDuration_hr), ...
+    stagePathKm, ...
+    cumsum(stagePathKm), ...
+    stageDownrangeKm, ...
+    cumsum(stageDownrangeKm), ...
+    stageFuelKg, ...
+    cumsum(stageFuelKg), ...
+    stageEnergyMJ, ...
+    stageMeanPowerkW, ...
+    stageMeanThrustN, ...
+    stageMeanAccel, ...
+    stageMeanCL, ...
+    stageMeanCD, ...
+    stageMeanFuelFlow, ...
+    'VariableNames', {'Stage','Duration_hr','CumulativeTime_hr','PathLength_km','CumulativePath_km','Downrange_km','CumulativeDownrange_km','FuelUsed_kg','CumulativeFuelUsed_kg','FuelEnergy_MJ','MeanPower_kW','MeanThrust_N','MeanAccel_mps2','MeanCL','MeanCD','MeanFuelFlow_kgs'});
+
+sim = struct();
+sim.t = t;
+sim.V = V;
+sim.h = h;
+sim.phaseIdx = phaseIdx;
+sim.phaseNames = phaseNames;
+sim.phaseEdges = phaseEdges;
+sim.x = x;
+sim.y = y;
+sim.pathS = pathS;
+sim.gammaPath = gammaPath;
+sim.aLong = aLong;
+sim.tempK = tempK;
+sim.pressurePa = pressurePa;
+sim.rho = rho;
+sim.aSound = aSound;
+sim.mach = mach;
+sim.mass = mass;
+sim.fuelMass = fuelMass;
+sim.fuelUsed = fuelUsed;
+sim.CL = CL;
+sim.CD = CD;
+sim.Lift = Lift;
+sim.Drag = Drag;
+sim.ThrustReq = ThrustReq;
+sim.PowerReq = PowerReq;
+sim.PowerUsed = PowerUsed;
+sim.fuelFlow = fuelFlow;
+sim.fuelEnergyRate = fuelEnergyRate;
+sim.fuelEnergyCum = fuelEnergyCum;
+sim.fuelEnergyCumMJ = fuelEnergyCumMJ;
+sim.CO2cum = CO2cum;
+sim.LD = LD;
+sim.thrustAvailable = thrustAvailable;
+sim.VstallTime = VstallTime;
+sim.stageSummary = stageSummary;
+end
+
+function atmModel = makeAtmosphereModel(p, mode, referenceAltitude_m)
+mode = lower(mode);
+atmModel = struct();
+atmModel.mode = mode;
+switch mode
+    case 'variable'
+        atmModel.referenceAltitude_m = NaN;
+        atmModel.temperatureK = NaN;
+        atmModel.pressurePa = NaN;
+        atmModel.density = NaN;
+        atmModel.speedOfSound = NaN;
+    case 'fixed'
+        [Tref, Pref, rhoref, aref] = isaTroposphere(referenceAltitude_m, p);
+        atmModel.referenceAltitude_m = referenceAltitude_m;
+        atmModel.temperatureK = Tref;
+        atmModel.pressurePa = Pref;
+        atmModel.density = rhoref;
+        atmModel.speedOfSound = aref;
+    otherwise
+        error('Unknown atmosphere mode "%s". Use "variable" or "fixed".', mode);
+end
+end
+
+function [T, P, rho, aSound] = evaluateAtmosphere(h, p, atmModel)
+if nargin < 3 || isempty(atmModel) || ~isfield(atmModel, 'mode') || strcmpi(atmModel.mode, 'variable')
+    [T, P, rho, aSound] = isaTroposphere(h, p);
+    return;
+end
+
+switch lower(atmModel.mode)
+    case 'fixed'
+        T = atmModel.temperatureK * ones(size(h));
+        P = atmModel.pressurePa * ones(size(h));
+        rho = atmModel.density * ones(size(h));
+        aSound = atmModel.speedOfSound * ones(size(h));
+    otherwise
+        [T, P, rho, aSound] = isaTroposphere(h, p);
+end
+end
+
+function stageMatrix = buildStageMetricMatrix(stageSummary)
+metricNames = { ...
+    'Duration_hr'; ...
+    'PathLength_km'; ...
+    'Downrange_km'; ...
+    'FuelUsed_kg'; ...
+    'FuelEnergy_MJ'; ...
+    'MeanPower_kW'; ...
+    'MeanThrust_N'; ...
+    'MeanAccel_mps2'; ...
+    'MeanCL'; ...
+    'MeanCD'; ...
+    'MeanFuelFlow_kgs'};
+
+stageLabels = matlab.lang.makeUniqueStrings(matlab.lang.makeValidName(cellstr(stageSummary.Stage)));
+
+metricValues = zeros(numel(metricNames), height(stageSummary));
+for m = 1:numel(metricNames)
+    metricValues(m, :) = stageSummary.(metricNames{m}).';
+end
+
+stageMatrix = table(string(metricNames), 'VariableNames', {'Metric'});
+for i = 1:numel(stageLabels)
+    stageMatrix.(stageLabels{i}) = metricValues(:, i);
+end
+end
+
+function sensitivityTable = buildAtmosphereSensitivityTable(simVariable, simFixed, referenceAltitude_m, caseName)
+metrics = string({ ...
+    'MissionTime_hr', ...
+    'PathLength_km', ...
+    'FuelUsed_kg', ...
+    'Downrange_km', ...
+    'FuelRemaining_kg', ...
+    'FuelEnergy_MJ', ...
+    'CO2_kg', ...
+    'AverageFuelRate_kgph', ...
+    'MeanTemperature_K', ...
+    'MeanDensity_kgpm3', ...
+    'MeanMach', ...
+    'MeanCL', ...
+    'MeanCD', ...
+    'MaxThrust_N'}).';
+
+variableValues = [ ...
+    simVariable.t(end) / 3600; ...
+    simVariable.stageSummary.CumulativePath_km(end); ...
+    simVariable.fuelUsed(end); ...
+    simVariable.stageSummary.CumulativeDownrange_km(end); ...
+    simVariable.fuelMass(end); ...
+    simVariable.fuelEnergyCumMJ(end); ...
+    simVariable.CO2cum(end); ...
+    simVariable.fuelUsed(end) / max(simVariable.t(end) / 3600, eps); ...
+    mean(simVariable.tempK); ...
+    mean(simVariable.rho); ...
+    mean(simVariable.mach); ...
+    mean(simVariable.CL); ...
+    mean(simVariable.CD); ...
+    max(simVariable.ThrustReq)];
+
+fixedValues = [ ...
+    simFixed.t(end) / 3600; ...
+    simFixed.stageSummary.CumulativePath_km(end); ...
+    simFixed.fuelUsed(end); ...
+    simFixed.stageSummary.CumulativeDownrange_km(end); ...
+    simFixed.fuelMass(end); ...
+    simFixed.fuelEnergyCumMJ(end); ...
+    simFixed.CO2cum(end); ...
+    simFixed.fuelUsed(end) / max(simFixed.t(end) / 3600, eps); ...
+    mean(simFixed.tempK); ...
+    mean(simFixed.rho); ...
+    mean(simFixed.mach); ...
+    mean(simFixed.CL); ...
+    mean(simFixed.CD); ...
+    max(simFixed.ThrustReq)];
+
+sensitivityTable = table( ...
+    repmat(string(caseName), numel(metrics), 1), ...
+    metrics, ...
+    variableValues, ...
+    fixedValues, ...
+    fixedValues - variableValues, ...
+    100 * (fixedValues - variableValues) ./ max(abs(variableValues), eps), ...
+    repmat(referenceAltitude_m, numel(metrics), 1), ...
+    'VariableNames', {'Case','Metric','VariableAtmosphere','FixedAtmosphere','AbsoluteDifference','PercentDifference_Fixed_vs_Variable','FixedReferenceAltitude_m'});
+end
+
+    function comparisonTable = buildOverallComparisonTable(paper, simVariable, fixedAtmosphere)
+metrics = string({ ...
+    'InitialMass_kg', ...
+    'FuelMass_kg', ...
+    'Wingspan_m', ...
+    'WingArea_m2', ...
+    'Length_m', ...
+    'EnginePower_hp', ...
+    'MissionTime_hr', ...
+    'TotalRange_km', ...
+    'FuelUsed_kg', ...
+    'FuelRemaining_kg', ...
+    'AverageFuelRate_kgph'}).';
+
+paperSource = string({ ...
+    'Paper Table 1', ...
+    'Paper Table 1', ...
+    'Paper Table 2', ...
+    'Paper Table 2', ...
+    'Paper Table 2', ...
+    'Paper Table 3', ...
+    'Paper Table 5', ...
+    'Paper Table 5', ...
+    'Paper Table 5', ...
+    'Paper Table 5', ...
+    'Derived from Table 5'}).';
+
+literatureValues = [ ...
+    paper.aircraft.mass0; ...
+    paper.aircraft.fuelMass0; ...
+    paper.aircraft.wingspan; ...
+    paper.aircraft.wingArea; ...
+    paper.aircraft.length; ...
+    paper.aircraft.enginePowerHP; ...
+    paper.published.totalTime_hr; ...
+    paper.published.totalRange_km; ...
+    paper.published.totalFuelConsumed_kg; ...
+    paper.published.remainingFuel_kg; ...
+    paper.published.totalFuelConsumed_kg / paper.published.totalTime_hr];
+
+modelValues = [ ...
+    paper.aircraft.mass0; ...
+    paper.aircraft.fuelMass0; ...
+    paper.aircraft.wingspan; ...
+    paper.aircraft.wingArea; ...
+    paper.aircraft.length; ...
+    paper.aircraft.enginePowerHP; ...
+    simVariable.t(end) / 3600; ...
+    simVariable.stageSummary.CumulativeDownrange_km(end); ...
+    simVariable.fuelUsed(end); ...
+    simVariable.fuelMass(end); ...
+    simVariable.fuelUsed(end) / max(simVariable.t(end) / 3600, eps)];
+
+comparisonTable = table( ...
+    metrics, ...
+    paperSource, ...
+    literatureValues, ...
+    modelValues, ...
+    100 * (modelValues - literatureValues) ./ max(abs(literatureValues), eps), ...
+    repmat(fixedAtmosphere.referenceAltitude_m, numel(metrics), 1), ...
+    'VariableNames', {'Metric','SourceInPaper','LiteraturePaper','OurBenchmarkModel','PercentDifference','FixedAtmosphereReferenceAltitude_m'});
+end
+function overviewTable = buildMissionOverviewTable(tb2, study, optSummary, simVariable, simFixed, fixedAtmosphere)
+metrics = string({ ...
+    'InitialMass_kg', ...
+    'FuelMass_kg', ...
+    'Wingspan_m', ...
+    'WingArea_m2', ...
+    'CruiseAltitude_m', ...
+    'OutboundRange_km', ...
+    'InboundRange_km', ...
+    'LoiterDuration_min', ...
+    'OptimizedTransitSpeed_mps', ...
+    'OptimizedLoiterSpeed_mps', ...
+    'MissionTime_hr', ...
+    'PathLength_km', ...
+    'FuelUsed_kg', ...
+    'FuelRemaining_kg', ...
+    'CO2_kg', ...
+    'FixedAtmosphereReferenceAltitude_m'}).';
+
+variableValues = [ ...
+    tb2.mass0; ...
+    tb2.fuelMass0; ...
+    tb2.wingspan; ...
+    tb2.wingArea; ...
+    study.cruiseAltitude; ...
+    study.outboundRange_km; ...
+    study.inboundRange_km; ...
+    study.loiterDuration_min; ...
+    optSummary.Vtransit; ...
+    optSummary.Vloiter; ...
+    simVariable.t(end) / 3600; ...
+    simVariable.stageSummary.CumulativePath_km(end); ...
+    simVariable.fuelUsed(end); ...
+    simVariable.fuelMass(end); ...
+    simVariable.CO2cum(end); ...
+    fixedAtmosphere.referenceAltitude_m];
+
+fixedValues = [ ...
+    tb2.mass0; ...
+    tb2.fuelMass0; ...
+    tb2.wingspan; ...
+    tb2.wingArea; ...
+    study.cruiseAltitude; ...
+    study.outboundRange_km; ...
+    study.inboundRange_km; ...
+    study.loiterDuration_min; ...
+    optSummary.Vtransit; ...
+    optSummary.Vloiter; ...
+    simFixed.t(end) / 3600; ...
+    simFixed.stageSummary.CumulativePath_km(end); ...
+    simFixed.fuelUsed(end); ...
+    simFixed.fuelMass(end); ...
+    simFixed.CO2cum(end); ...
+    fixedAtmosphere.referenceAltitude_m];
+
+overviewTable = table( ...
+    metrics, ...
+    variableValues, ...
+    fixedValues, ...
+    100 * (fixedValues - variableValues) ./ max(abs(variableValues), eps), ...
+    'VariableNames', {'Metric','VariableAtmosphere','FixedAtmosphere','PercentDifference_Fixed_vs_Variable'});
+end
+
+function decision = summarizeAtmosphereImpact(sensitivityTable)
+keyMetrics = ["MissionTime_hr","PathLength_km","FuelUsed_kg","Downrange_km"];
+idx = ismember(sensitivityTable.Metric, keyMetrics);
+keyPercentDiff = abs(sensitivityTable.PercentDifference_Fixed_vs_Variable(idx));
+maxKeyPercentDifference = max(keyPercentDiff);
+
+if maxKeyPercentDifference < 2
+    recommendation = "Fixed atmosphere is essentially identical for the key outputs.";
+elseif maxKeyPercentDifference < 5
+    recommendation = "Fixed atmosphere is acceptable for early-stage analysis, with only small deviations.";
+else
+    recommendation = "Altitude-varying atmosphere should be retained because the impact is no longer negligible.";
+end
+
+decision = struct();
+decision.keyMetrics = keyMetrics;
+decision.maxKeyPercentDifference = maxKeyPercentDifference;
+decision.recommendation = recommendation;
+end
+
+function normalized = buildNormalizedStageProfiles(sim)
+numStages = numel(sim.phaseNames);
+equalStageTime = zeros(size(sim.t));
+localStageTime = zeros(size(sim.t));
+for i = 1:numStages
+    idx = find(sim.phaseIdx == i);
+    tStart = sim.phaseEdges(i);
+    tEnd = sim.phaseEdges(i + 1);
+    denom = max(tEnd - tStart, eps);
+    localStageTime(idx) = (sim.t(idx) - tStart) / denom;
+    equalStageTime(idx) = (i - 1) + localStageTime(idx);
+end
+normalized = struct();
+normalized.numStages = numStages;
+normalized.equalStageTime = equalStageTime;
+normalized.localStageTime = localStageTime;
+normalized.V = sim.V;
+normalized.fuelFlow = sim.fuelFlow;
+normalized.ThrustReq = sim.ThrustReq;
+normalized.fuelUsed = sim.fuelUsed;
+end
+
+function [t, V, h, phaseIdx, phaseNames, phaseEdges, modeIdx, loiterRadius] = buildMissionProfile(mission, dt)
+numPhases = numel(mission);
+phaseNames = cell(numPhases,1);
+phaseEdges = zeros(numPhases + 1, 1);
+t = [];
+V = [];
+h = [];
+phaseIdx = [];
+modeIdx = [];
+loiterRadius = [];
+timeCursor = 0;
+phaseEdges(1) = 0;
+
+for i = 1:numPhases
+    phaseNames{i} = mission(i).name;
+    nPts = round(mission(i).duration / dt) + 1;
+    tau = linspace(0, mission(i).duration, nPts).';
+    tSeg = timeCursor + tau;
+    VSeg = linspace(mission(i).V0, mission(i).V1, nPts).';
+    hSeg = linspace(mission(i).h0, mission(i).h1, nPts).';
+    modeSeg = ones(nPts,1);
+    if isfield(mission(i), 'mode') && strcmpi(mission(i).mode, 'loiter')
+        modeSeg(:) = 2;
+    end
+    radSeg = zeros(nPts,1);
+    if isfield(mission(i), 'loiterRadius')
+        radSeg(:) = mission(i).loiterRadius;
+    end
+
+    if i > 1
+        tSeg = tSeg(2:end);
+        VSeg = VSeg(2:end);
+        hSeg = hSeg(2:end);
+        modeSeg = modeSeg(2:end);
+        radSeg = radSeg(2:end);
+    end
+
+    t = [t; tSeg]; %#ok<AGROW>
+    V = [V; VSeg]; %#ok<AGROW>
+    h = [h; hSeg]; %#ok<AGROW>
+    phaseIdx = [phaseIdx; i * ones(numel(tSeg),1)]; %#ok<AGROW>
+    modeIdx = [modeIdx; modeSeg]; %#ok<AGROW>
+    loiterRadius = [loiterRadius; radSeg]; %#ok<AGROW>
+
+    timeCursor = timeCursor + mission(i).duration;
+    phaseEdges(i + 1) = timeCursor;
+end
+end
+
+function [T, P, rho, aSound] = isaTroposphere(h, p)
+T = zeros(size(h));
+P = zeros(size(h));
+rho = zeros(size(h));
+aSound = zeros(size(h));
+for i = 1:numel(h)
+    hi = h(i);
+    if hi <= 11000
+        L = 0.0065;
+        T(i) = p.T0 - L * hi;
+        P(i) = p.P0 * (T(i) / p.T0)^(p.g / (p.R * L));
+    else
+        T11 = 216.65;
+        P11 = p.P0 * (T11 / p.T0)^(p.g / (p.R * 0.0065));
+        T(i) = T11;
+        P(i) = P11 * exp(-p.g * (hi - 11000) / (p.R * T11));
+    end
+    rho(i) = P(i) / (p.R * T(i));
+    aSound(i) = sqrt(p.gammaAir * p.R * T(i));
+end
+end
+
+function annotatePhases(ax, phaseEdges, phaseNames)
+hold(ax, 'on');
+yl = ylim(ax);
+for i = 2:numel(phaseEdges)-1
+    xline(ax, phaseEdges(i) / 60, ':k', 'HandleVisibility', 'off');
+end
+for i = 1:numel(phaseNames)
+    xMid = mean(phaseEdges(i:i+1)) / 60;
+    yTxt = yl(2) - 0.06 * range(yl);
+    text(ax, xMid, yTxt, phaseNames{i}, 'HorizontalAlignment', 'center', 'VerticalAlignment', 'top', 'FontSize', 8, 'Color', [0.25 0.25 0.25], 'HandleVisibility', 'off');
+end
+end
+
+function annotatePhasesHours(ax, phaseEdges, phaseNames)
+hold(ax, 'on');
+yl = ylim(ax);
+for i = 2:numel(phaseEdges)-1
+    xline(ax, phaseEdges(i) / 3600, ':k', 'HandleVisibility', 'off');
+end
+for i = 1:numel(phaseNames)
+    xMid = mean(phaseEdges(i:i+1)) / 3600;
+    yTxt = yl(2) - 0.06 * range(yl);
+    text(ax, xMid, yTxt, phaseNames{i}, 'HorizontalAlignment', 'center', 'VerticalAlignment', 'top', 'FontSize', 8, 'Color', [0.25 0.25 0.25], 'HandleVisibility', 'off');
+end
+end
+
+function annotateEqualStages(ax, numStages, phaseNames)
+hold(ax, 'on');
+yl = ylim(ax);
+for i = 1:(numStages-1)
+    xline(ax, i, ':k', 'HandleVisibility', 'off');
+end
+for i = 1:numStages
+    xMid = i - 0.5;
+    yTxt = yl(2) - 0.06 * range(yl);
+    text(ax, xMid, yTxt, phaseNames{i}, 'HorizontalAlignment', 'center', 'VerticalAlignment', 'top', 'FontSize', 8, 'Color', [0.25 0.25 0.25], 'HandleVisibility', 'off');
+end
+end
+
+function out = ternary(cond, a, b)
+if cond
+    out = a;
+else
+    out = b;
+end
+end
