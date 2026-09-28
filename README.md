@@ -33,7 +33,7 @@ This repository contains **my part of the thesis: the ICE propulsion mission mod
 - **Atmosphere sensitivity:** a fixed atmosphere changes the TB2 outputs by at most about 0.06 % (fuel −0.063 %), so the simplification is justified for the propulsion comparison. For the higher-altitude paper mission, it would introduce a +4.70 % fuel error.
 
 | Stage | Duration (h) | Path (km) | Fuel (kg) | Energy (MJ) |
-|---|---|---|---|---|
+|:--|:--|:--|:--|:--|
 | Takeoff | 0.013 | 1.43 | 0.211 | 9.05 |
 | Climb | 0.167 | 21.18 | 3.954 | 170.0 |
 | Transit Out | 0.900 | 120.01 | 6.779 | 291.5 |
@@ -83,7 +83,7 @@ The individual dashboard panels (`figures/00_…` to `13_…`) are also provided
 
 ## Repository contents
 | Path | Content | Opens with |
-|---|---|---|
+|:--|:--|:--|
 | `code/matlab/tb2_ice_masoodwei_calibrated_mission.m` | My ICE mission model: benchmark rebuild, BSFC calibration, atmosphere sensitivity, TB2 ISR mission, speed optimisation and all plots | MATLAB (R2024 used in the thesis) |
 | `code/matlab/tb2_ice_masoodwei_calibrated_mission.txt` | Plain-text copy of the same model (same code apart from blank lines and indentation) | Any text editor |
 | `report/FINAL-REPORT.pdf` | Full capstone thesis (56 pages, all three propulsion models) | Any PDF reader |
@@ -106,5 +106,4 @@ Only my own code is included here. The hybrid and EM models are described in the
 ## References
 Masood, K. and Wei, Z. (2012), "Detailed Flight Performance Analysis of a Fixed Wing UAV", AIAA 2012-2595. The full reference list is in the thesis.
 
----
 Kaoutar Ammara · Aerospace Engineer · [GitHub](https://github.com/Kiwiiiieee) · [LinkedIn](https://linkedin.com/in/kaoutar-ammara)
